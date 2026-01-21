@@ -9,9 +9,9 @@ import veritabani
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(
-    page_title="Solar TCP Monitor Pro",
+    page_title="Solar Multi-Monitor",
     layout="wide",
-    page_icon="⚡",
+    page_icon="🏭",
     initial_sidebar_state="expanded"
 )
 
@@ -24,58 +24,62 @@ st.markdown("""
     .stApp { background-color: #0E1117; color: #E0E0E0; }
     div[data-testid="stMetric"] {
         background-color: #1E1E1E; border: 1px solid #333;
-        padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        padding: 10px; border-radius: 8px;
     }
     .chart-title {
-        font-size: 1.1rem; font-weight: 700; margin-bottom: 0px;
+        font-size: 1rem; font-weight: 700; margin-bottom: 0px;
         padding: 5px 10px; border-radius: 5px 5px 0 0; display: inline-block; width: 100%;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # --- YARDIMCI FONKSİYONLAR ---
-def validate_inputs(ip, port):
-    ip_pattern = r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$"
-    if not re.match(ip_pattern, ip): return False, "Geçersiz IP"
-    if not (1 <= port <= 65535): return False, "Geçersiz Port"
-    return True, None
+def parse_id_list(id_string):
+    """ '1, 2, 3-5' şeklindeki stringi [1, 2, 3, 4, 5] listesine çevirir. """
+    ids = set()
+    parts = id_string.split(',')
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                for i in range(start, end + 1):
+                    ids.add(i)
+            except: pass
+        else:
+            try:
+                ids.add(int(part))
+            except: pass
+    return sorted(list(ids))
 
 @st.cache_resource
 def get_modbus_client(ip, port):
-    return ModbusTcpClient(ip, port=port, timeout=2)
+    return ModbusTcpClient(ip, port=port, timeout=1) 
 
-# --- DINAMIK OKUMA FONKSİYONU ---
-def read_dynamic_modbus(ip, port, slave, config):
-    """
-    Belirtilen IP'den, kullanıcının girdiği adresleri tek tek okur.
-    config: {'guc_addr': 0, 'guc_scale': 1.0, ...}
-    """
-    client = get_modbus_client(ip, port)
-    if not client.connected: client.connect()
-    if not client.connected: return None, "Bağlantı Hatası"
-
+def read_device(client, slave_id, config):
+    """Tek bir cihazdan veri okur"""
     try:
-        # 1. GÜÇ OKUMA
-        r_guc = client.read_holding_registers(config['guc_addr'], 1, slave=slave)
-        if r_guc.isError(): raise Exception(f"Güç Hatası: {r_guc} (Adr: {config['guc_addr']})")
+        if not client.connected: client.connect()
+        
+        # GÜÇ
+        r_guc = client.read_holding_registers(config['guc_addr'], 1, slave=slave_id)
+        if r_guc.isError(): return None, "No Response"
         val_guc = r_guc.registers[0] * config['guc_scale']
 
-        # 2. VOLTAJ OKUMA
-        r_volt = client.read_holding_registers(config['volt_addr'], 1, slave=slave)
-        if r_volt.isError(): raise Exception(f"Voltaj Okunamadı (Adr: {config['volt_addr']})")
-        val_volt = r_volt.registers[0] * config['volt_scale']
+        # VOLTAJ
+        r_volt = client.read_holding_registers(config['volt_addr'], 1, slave=slave_id)
+        val_volt = 0 if r_volt.isError() else r_volt.registers[0] * config['volt_scale']
 
-        # 3. AKIM OKUMA
-        r_akim = client.read_holding_registers(config['akim_addr'], 1, slave=slave)
-        if r_akim.isError(): raise Exception(f"Akım Okunamadı (Adr: {config['akim_addr']})")
-        val_akim = r_akim.registers[0] * config['akim_scale']
+        # AKIM
+        r_akim = client.read_holding_registers(config['akim_addr'], 1, slave=slave_id)
+        val_akim = 0 if r_akim.isError() else r_akim.registers[0] * config['akim_scale']
 
-        # 4. SICAKLIK OKUMA
-        r_isi = client.read_holding_registers(config['isi_addr'], 1, slave=slave)
-        if r_isi.isError(): raise Exception(f"Isı Okunamadı (Adr: {config['isi_addr']})")
-        val_isi = r_isi.registers[0] * config['isi_scale']
+        # SICAKLIK
+        r_isi = client.read_holding_registers(config['isi_addr'], 1, slave=slave_id)
+        val_isi = 0 if r_isi.isError() else r_isi.registers[0] * config['isi_scale']
 
         return {
+            "slave_id": slave_id,
             "guc": val_guc,
             "voltaj": val_volt,
             "akim": val_akim,
@@ -84,121 +88,132 @@ def read_dynamic_modbus(ip, port, slave, config):
         }, None
 
     except Exception as e:
-        client.close()
         return None, str(e)
 
 # --- STATE ---
-if 'monitoring' not in st.session_state:
-    st.session_state.monitoring = False
+if 'monitoring' not in st.session_state: st.session_state.monitoring = False
 
-# --- YAN MENÜ (KONFIGURASYON MERKEZİ) ---
+# --- YAN MENÜ ---
 with st.sidebar:
-    st.header("⚙️ Bağlantı Ayarları")
-    target_ip = st.text_input("IP Adresi", value="127.0.0.1")
-    target_port = st.number_input("Port", value=5020, step=1)
-    slave_id = st.number_input("Slave ID", value=1, min_value=1)
+    st.header("🏭 Filo Ayarları")
+    target_ip = st.text_input("IP Adresi", value="10.35.14.10")
+    target_port = st.number_input("Port", value=502, step=1)
+    
+    st.info("Virgül veya tire ile ayırın (Örn: 1, 2, 5-8)")
+    id_input = st.text_input("İnverter ID Listesi", value="1, 2")
+    target_ids = parse_id_list(id_input)
+    st.write(f"📡 İzlenecek ID'ler: {target_ids}")
+    
+    st.divider()
+    
+    # --- YENİ EKLENEN KISIM: ZAMANLAYICI AYARI ---
+    st.header("⏳ Zamanlayıcı")
+    refresh_rate = st.number_input("Veri Çekme Sıklığı (Saniye)", value=30, min_value=1, step=1, help="Sistem bu süre kadar bekleyip sonra tekrar veri çeker.")
     
     st.markdown("---")
-    st.header("🗺️ Adres Haritası (Register Map)")
-    st.info("İnverter PDF'indeki Decimal adresleri giriniz.")
+    st.header("🗺️ Adres Haritası")
+    with st.expander("Detaylı Adres Ayarları"):
+        c_guc_adr = st.number_input("Güç Adresi", value=70)
+        c_guc_sc = st.number_input("Güç Çarpan", value=1.0)
+        c_volt_adr = st.number_input("Voltaj Adresi", value=71)
+        c_volt_sc = st.number_input("Voltaj Çarpan", value=0.1)
+        c_akim_adr = st.number_input("Akım Adresi", value=72)
+        c_akim_sc = st.number_input("Akım Çarpan", value=0.1)
+        c_isi_adr = st.number_input("Isı Adresi", value=73)
+        c_isi_sc = st.number_input("Isı Çarpan", value=1.0)
     
-    with st.expander("☀️ GÜÇ Ayarları", expanded=True):
-        conf_guc_adr = st.number_input("Güç Adresi", value=2, min_value=0)
-        conf_guc_carpan = st.number_input("Güç Çarpanı", value=1.0, step=0.1, format="%.2f")
-
-    with st.expander("⚡ VOLTAJ Ayarları", expanded=False):
-        conf_volt_adr = st.number_input("Voltaj Adresi", value=0, min_value=0)
-        conf_volt_carpan = st.number_input("Voltaj Çarpanı", value=1.0, step=0.1, format="%.2f")
-
-    with st.expander("ww AKIM Ayarları", expanded=False):
-        conf_akim_adr = st.number_input("Akım Adresi", value=1, min_value=0)
-        conf_akim_carpan = st.number_input("Akım Çarpanı", value=0.1, step=0.01, format="%.2f") # Örn: 125 gelir, 0.1 ile çarpıp 12.5 yaparız
-
-    with st.expander("🌡️ SICAKLIK Ayarları", expanded=False):
-        conf_isi_adr = st.number_input("Sıcaklık Adresi", value=4, min_value=0)
-        conf_isi_carpan = st.number_input("Sıcaklık Çarpanı", value=1.0, step=0.1, format="%.2f")
-
-    # Konfigürasyon Paketi
-    user_config = {
-        'guc_addr': conf_guc_adr, 'guc_scale': conf_guc_carpan,
-        'volt_addr': conf_volt_adr, 'volt_scale': conf_volt_carpan,
-        'akim_addr': conf_akim_adr, 'akim_scale': conf_akim_carpan,
-        'isi_addr': conf_isi_adr, 'isi_scale': conf_isi_carpan
+    config = {
+        'guc_addr': c_guc_adr, 'guc_scale': c_guc_sc,
+        'volt_addr': c_volt_adr, 'volt_scale': c_volt_sc,
+        'akim_addr': c_akim_adr, 'akim_scale': c_akim_sc,
+        'isi_addr': c_isi_adr, 'isi_scale': c_isi_sc
     }
 
-    st.divider()
-    c1, c2 = st.columns(2)
-    if c1.button("▶️ BAŞLAT", type="primary"):
-        v, m = validate_inputs(target_ip, target_port)
-        if v: st.session_state.monitoring = True
-        else: st.error(m)
-    if c2.button("⏹️ DURDUR"):
+    if st.button("▶️ SİSTEMİ BAŞLAT", type="primary"):
+        st.session_state.monitoring = True
+        st.rerun()
+    if st.button("⏹️ DURDUR"):
         st.session_state.monitoring = False
         st.rerun()
 
 # --- ANA EKRAN ---
-safe_ip = html.escape(target_ip)
-st.markdown(f"## ⚡ Solar Dashboard: <code style='color:#4FC3F7'>{safe_ip}:{target_port}</code>", unsafe_allow_html=True)
+st.title("⚡ Güneş Enerjisi Santrali İzleme")
 
-status_box = st.empty()
+st.subheader("📋 Canlı Filo Durumu")
+table_spot = st.empty()
+
 st.markdown("---")
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-metric_guc = kpi1.empty()
-metric_volt = kpi2.empty()
-metric_akim = kpi3.empty()
-metric_isi = kpi4.empty()
+col_sel, col_info = st.columns([1, 3])
+with col_sel:
+    selected_id = st.selectbox("📊 Detaylı Grafik İçin Cihaz Seç:", target_ids)
 
-row1_col1, row1_col2 = st.columns(2)
-row2_col1, row2_col2 = st.columns(2)
+# Grafik Yer Tutucuları
+row1_c1, row1_c2 = st.columns(2)
+row2_c1, row2_c2 = st.columns(2)
 
-with row1_col1:
-    st.markdown('<div class="chart-title" style="background:#332a00; color:#FFD700; border-left:4px solid #FFD700;">☀️ Anlık Güç (Watt)</div>', unsafe_allow_html=True)
-    chart_guc_spot = st.empty()
+with row1_c1:
+    st.markdown(f'<div class="chart-title" style="background:#332a00; color:#FFD700;">☀️ ID:{selected_id} - Güç</div>', unsafe_allow_html=True)
+    chart_guc = st.empty()
+with row1_c2:
+    st.markdown(f'<div class="chart-title" style="background:#001e33; color:#29B6F6;">⚡ ID:{selected_id} - Voltaj</div>', unsafe_allow_html=True)
+    chart_volt = st.empty()
+with row2_c1:
+    st.markdown(f'<div class="chart-title" style="background:#0a260e; color:#66BB6A;">ww ID:{selected_id} - Akım</div>', unsafe_allow_html=True)
+    chart_akim = st.empty()
+with row2_c2:
+    st.markdown(f'<div class="chart-title" style="background:#2e0a0a; color:#EF5350;">🌡️ ID:{selected_id} - Sıcaklık</div>', unsafe_allow_html=True)
+    chart_isi = st.empty()
 
-with row1_col2:
-    st.markdown('<div class="chart-title" style="background:#001e33; color:#29B6F6; border-left:4px solid #29B6F6;">⚡ Voltaj (Volt)</div>', unsafe_allow_html=True)
-    chart_volt_spot = st.empty()
+# --- DURUM ÇUBUĞU ---
+status_bar = st.empty()
 
-with row2_col1:
-    st.markdown('<div class="chart-title" style="background:#0a260e; color:#66BB6A; border-left:4px solid #66BB6A;">ww Akım (Amper)</div>', unsafe_allow_html=True)
-    chart_akim_spot = st.empty()
+def ui_refresh():
+    summary_data = veritabani.tum_cihazlarin_son_durumu()
+    if summary_data:
+        df_sum = pd.DataFrame(summary_data, columns=["ID", "Son Zaman", "Güç (W)", "Voltaj (V)", "Akım (A)", "Isı (C)"])
+        df_sum["Son Zaman"] = pd.to_datetime(df_sum["Son Zaman"]).dt.strftime('%H:%M:%S')
+        table_spot.dataframe(df_sum.set_index("ID"), use_container_width=True)
 
-with row2_col2:
-    st.markdown('<div class="chart-title" style="background:#2e0a0a; color:#EF5350; border-left:4px solid #EF5350;">🌡️ Sıcaklık (°C)</div>', unsafe_allow_html=True)
-    chart_isi_spot = st.empty()
-
-def ui_guncelle():
-    rows = veritabani.son_verileri_getir(limit=100)
-    if rows:
-        df = pd.DataFrame(rows, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df = df.set_index("timestamp")
-        chart_guc_spot.area_chart(df["guc"], color="#FFD700")
-        chart_volt_spot.line_chart(df["voltaj"], color="#29B6F6")
-        chart_akim_spot.area_chart(df["akim"], color="#66BB6A")
-        chart_isi_spot.line_chart(df["sicaklik"], color="#EF5350")
+    detail_data = veritabani.son_verileri_getir(selected_id, limit=100)
+    if detail_data:
+        df_det = pd.DataFrame(detail_data, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik"])
+        df_det["timestamp"] = pd.to_datetime(df_det["timestamp"])
+        df_det = df_det.set_index("timestamp")
+        
+        chart_guc.area_chart(df_det["guc"], color="#FFD700")
+        chart_volt.line_chart(df_det["voltaj"], color="#29B6F6")
+        chart_akim.area_chart(df_det["akim"], color="#66BB6A")
+        chart_isi.line_chart(df_det["sicaklik"], color="#EF5350")
 
 # --- ANA DÖNGÜ ---
 if st.session_state.monitoring:
-    status_box.success(f"✅ Canlı İzleme Aktif (Slave ID: {slave_id})")
+    client = get_modbus_client(target_ip, target_port)
+    status_bar.success(f"✅ Sistem Aktif - {refresh_rate} saniyede bir güncelleniyor.")
     
     while True:
-        # Config'i her döngüde parametre olarak gönderiyoruz
-        data, err = read_dynamic_modbus(target_ip, target_port, slave_id, user_config)
+        # 1. TÜM CİHAZLARI TARA
+        for dev_id in target_ids:
+            data, err = read_device(client, dev_id, config)
+            if data:
+                veritabani.veri_ekle(dev_id, data)
+            else:
+                print(f"Hata ID {dev_id}: {err}")
         
-        if err:
-            status_box.error(f"⚠️ {err}")
-            time.sleep(2)
-        else:
-            metric_guc.metric("Güç", f"{data['guc']:.1f} W")
-            metric_volt.metric("Voltaj", f"{data['voltaj']:.1f} V")
-            metric_akim.metric("Akım", f"{data['akim']:.2f} A")
-            metric_isi.metric("Sıcaklık", f"{data['sicaklik']:.1f} °C")
-            
-            veritabani.veri_ekle(data)
-            ui_guncelle()
+        # 2. EKRANI GÜNCELLE
+        ui_refresh()
+        
+        # 3. BELİRLENEN SÜRE KADAR BEKLE
+        # Kullanıcı arayüzünde takılma olmasın diye küçük parçalar halinde bekle
+        for i in range(refresh_rate):
+            # Eğer bekleme sırasında kullanıcı "Durdur"a basarsa anında çık
+            if not st.session_state.monitoring:
+                break
             time.sleep(1)
+            
+        # Eğer döngüden çıkıldıysa ana while'ı da kır
+        if not st.session_state.monitoring:
+            break
 
 else:
-    status_box.info("Sistem Beklemede... Lütfen Sol Menüden Adresleri Ayarlayıp Başlatın.")
-    ui_guncelle()
+    ui_refresh()
+    status_bar.info("Sistem Beklemede. Ayarları yapıp başlatın.")
