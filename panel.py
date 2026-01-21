@@ -95,7 +95,7 @@ if 'monitoring' not in st.session_state: st.session_state.monitoring = False
 
 # --- YAN MENÜ ---
 with st.sidebar:
-    st.header("🏭 Filo Ayarları")
+    st.header("🏭 PULSAR Ayarları")
     target_ip = st.text_input("IP Adresi", value="10.35.14.10")
     target_port = st.number_input("Port", value=502, step=1)
     

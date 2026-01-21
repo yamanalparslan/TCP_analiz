@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  solar-monitor:
+    container_name: solar_monitor_pro
+    build: .
+    ports:
+      - "8501:8501"  # Bilgisayarın 8501 portunu konteynere yönlendir
+    volumes:
+      # KRİTİK: Veritabanı dosyası kaybolmasın, bilgisayarın diskine yazılsın.
+      # Konteyner silinse bile verilerin masaüstünde kalır.
+      - ./solar_log.db:/app/solar_log.db
+      
+      # Zaman senkronizasyonu (Linux sunucular için)
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped  # Bilgisayar yeniden başlarsa OTOMATİK BAŞLAT
+    environment:
+      - PYTHONUNBUFFERED=1 # Logları anlık görmek için
