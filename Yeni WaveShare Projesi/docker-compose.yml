@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  # 1. ARKA PLAN SERVİSİ (Veri Toplar)
+  collector:
+    build: .
+    container_name: solar_collector
+    restart: always
+    volumes:
+      - ./solar_log.db:/app/solar_log.db
+      - /etc/localtime:/etc/localtime:ro
+    entrypoint: ["python", "collector.py"] # Bu servis collector.py'yi çalıştırır
+
+  # 2. ÖN YÜZ (Arayüz Gösterir)
+  frontend:
+    build: .
+    container_name: solar_frontend
+    restart: always
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./solar_log.db:/app/solar_log.db # AYNI veritabanına bakar
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - collector
+    entrypoint: ["streamlit", "run", "panel.py", "--server.port=8501", "--server.address=0.0.0.0"]
