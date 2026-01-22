@@ -1,219 +1,147 @@
 import streamlit as st
 import time
 import pandas as pd
-import re
-import html
-from datetime import datetime
-from pymodbus.client import ModbusTcpClient
-import veritabani 
+import json
+import veritabani
+import plotly.graph_objects as go
+import plotly.express as px
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(
-    page_title="Solar Multi-Monitor",
-    layout="wide",
-    page_icon="🏭",
-    initial_sidebar_state="expanded"
-)
+# --- 1. SAYFA AYARLARI ---
+st.set_page_config(page_title="Solar Master", layout="wide", page_icon="☀️", initial_sidebar_state="collapsed")
 
-# DB Başlat
-veritabani.init_db()
+# Veritabanı başlat
+try: veritabani.init_db()
+except: pass
 
-# --- CSS TASARIMI ---
+# --- 2. CSS ---
 st.markdown("""
 <style>
-    .stApp { background-color: #0E1117; color: #E0E0E0; }
+    .stApp { background-color: #0E1117; }
     div[data-testid="stMetric"] {
-        background-color: #1E1E1E; border: 1px solid #333;
-        padding: 10px; border-radius: 8px;
+        background-color: #1a1c24; border: 1px solid #30333d; border-radius: 10px; padding: 10px;
     }
-    .chart-title {
-        font-size: 1rem; font-weight: 700; margin-bottom: 0px;
-        padding: 5px 10px; border-radius: 5px 5px 0 0; display: inline-block; width: 100%;
-    }
+    [data-testid="stMetricValue"] { color: #fbbf24 !important; font-size: 26px !important; }
+    [data-testid="stMetricLabel"] { color: #9ca3af !important; }
+    [data-testid="stSidebar"] { background-color: #11131b; border-right: 1px solid #30333d; }
+    [data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- YARDIMCI FONKSİYONLAR ---
-def parse_id_list(id_string):
-    """ '1, 2, 3-5' şeklindeki stringi [1, 2, 3, 4, 5] listesine çevirir. """
-    ids = set()
-    parts = id_string.split(',')
-    for part in parts:
-        part = part.strip()
-        if '-' in part:
-            try:
-                start, end = map(int, part.split('-'))
-                for i in range(start, end + 1):
-                    ids.add(i)
-            except: pass
-        else:
-            try:
-                ids.add(int(part))
-            except: pass
-    return sorted(list(ids))
+# --- 3. HEADER ---
+c1, c2 = st.columns([1, 15])
+with c1: st.header("☀️")
+with c2: st.header("Solar Master SCADA")
 
-@st.cache_resource
-def get_modbus_client(ip, port):
-    return ModbusTcpClient(ip, port=port, timeout=1) 
-
-def read_device(client, slave_id, config):
-    """Tek bir cihazdan veri okur"""
-    try:
-        if not client.connected: client.connect()
-        
-        # GÜÇ
-        r_guc = client.read_holding_registers(config['guc_addr'], 1, slave=slave_id)
-        if r_guc.isError(): return None, "No Response"
-        val_guc = r_guc.registers[0] * config['guc_scale']
-
-        # VOLTAJ
-        r_volt = client.read_holding_registers(config['volt_addr'], 1, slave=slave_id)
-        val_volt = 0 if r_volt.isError() else r_volt.registers[0] * config['volt_scale']
-
-        # AKIM
-        r_akim = client.read_holding_registers(config['akim_addr'], 1, slave=slave_id)
-        val_akim = 0 if r_akim.isError() else r_akim.registers[0] * config['akim_scale']
-
-        # SICAKLIK
-        r_isi = client.read_holding_registers(config['isi_addr'], 1, slave=slave_id)
-        val_isi = 0 if r_isi.isError() else r_isi.registers[0] * config['isi_scale']
-
-        return {
-            "slave_id": slave_id,
-            "guc": val_guc,
-            "voltaj": val_volt,
-            "akim": val_akim,
-            "sicaklik": val_isi,
-            "timestamp": datetime.now()
-        }, None
-
-    except Exception as e:
-        return None, str(e)
-
-# --- STATE ---
-if 'monitoring' not in st.session_state: st.session_state.monitoring = False
-
-# --- YAN MENÜ ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
-    st.header("🏭 PULSAR Ayarları")
-    target_ip = st.text_input("IP Adresi", value="10.35.14.10")
-    target_port = st.number_input("Port", value=502, step=1)
+    st.header("⚙️ Ayarlar")
+    curr_conf = json.loads(veritabani.get_ayar("modbus_config"))
     
-    st.info("Virgül veya tire ile ayırın (Örn: 1, 2, 5-8)")
-    id_input = st.text_input("İnverter ID Listesi", value="1, 2")
-    target_ids = parse_id_list(id_input)
-    st.write(f"📡 İzlenecek ID'ler: {target_ids}")
-    
-    st.divider()
-    
-    # --- YENİ EKLENEN KISIM: ZAMANLAYICI AYARI ---
-    st.header("⏳ Zamanlayıcı")
-    refresh_rate = st.number_input("Veri Çekme Sıklığı (Saniye)", value=30, min_value=1, step=1, help="Sistem bu süre kadar bekleyip sonra tekrar veri çeker.")
-    
-    st.markdown("---")
-    st.header("🗺️ Adres Haritası")
-    with st.expander("Detaylı Adres Ayarları"):
-        c_guc_adr = st.number_input("Güç Adresi", value=70)
-        c_guc_sc = st.number_input("Güç Çarpan", value=1.0)
-        c_volt_adr = st.number_input("Voltaj Adresi", value=71)
-        c_volt_sc = st.number_input("Voltaj Çarpan", value=0.1)
-        c_akim_adr = st.number_input("Akım Adresi", value=72)
-        c_akim_sc = st.number_input("Akım Çarpan", value=0.1)
-        c_isi_adr = st.number_input("Isı Adresi", value=73)
-        c_isi_sc = st.number_input("Isı Çarpan", value=1.0)
-    
-    config = {
-        'guc_addr': c_guc_adr, 'guc_scale': c_guc_sc,
-        'volt_addr': c_volt_adr, 'volt_scale': c_volt_sc,
-        'akim_addr': c_akim_adr, 'akim_scale': c_akim_sc,
-        'isi_addr': c_isi_adr, 'isi_scale': c_isi_sc
-    }
-
-    if st.button("▶️ SİSTEMİ BAŞLAT", type="primary"):
-        st.session_state.monitoring = True
-        st.rerun()
-    if st.button("⏹️ DURDUR"):
-        st.session_state.monitoring = False
-        st.rerun()
-
-# --- ANA EKRAN ---
-st.title("⚡ Güneş Enerjisi Santrali İzleme")
-
-st.subheader("📋 Canlı Filo Durumu")
-table_spot = st.empty()
-
-st.markdown("---")
-col_sel, col_info = st.columns([1, 3])
-with col_sel:
-    selected_id = st.selectbox("📊 Detaylı Grafik İçin Cihaz Seç:", target_ids)
-
-# Grafik Yer Tutucuları
-row1_c1, row1_c2 = st.columns(2)
-row2_c1, row2_c2 = st.columns(2)
-
-with row1_c1:
-    st.markdown(f'<div class="chart-title" style="background:#332a00; color:#FFD700;">☀️ ID:{selected_id} - Güç</div>', unsafe_allow_html=True)
-    chart_guc = st.empty()
-with row1_c2:
-    st.markdown(f'<div class="chart-title" style="background:#001e33; color:#29B6F6;">⚡ ID:{selected_id} - Voltaj</div>', unsafe_allow_html=True)
-    chart_volt = st.empty()
-with row2_c1:
-    st.markdown(f'<div class="chart-title" style="background:#0a260e; color:#66BB6A;">ww ID:{selected_id} - Akım</div>', unsafe_allow_html=True)
-    chart_akim = st.empty()
-with row2_c2:
-    st.markdown(f'<div class="chart-title" style="background:#2e0a0a; color:#EF5350;">🌡️ ID:{selected_id} - Sıcaklık</div>', unsafe_allow_html=True)
-    chart_isi = st.empty()
-
-# --- DURUM ÇUBUĞU ---
-status_bar = st.empty()
-
-def ui_refresh():
-    summary_data = veritabani.tum_cihazlarin_son_durumu()
-    if summary_data:
-        df_sum = pd.DataFrame(summary_data, columns=["ID", "Son Zaman", "Güç (W)", "Voltaj (V)", "Akım (A)", "Isı (C)"])
-        df_sum["Son Zaman"] = pd.to_datetime(df_sum["Son Zaman"]).dt.strftime('%H:%M:%S')
-        table_spot.dataframe(df_sum.set_index("ID"), use_container_width=True)
-
-    detail_data = veritabani.son_verileri_getir(selected_id, limit=100)
-    if detail_data:
-        df_det = pd.DataFrame(detail_data, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik"])
-        df_det["timestamp"] = pd.to_datetime(df_det["timestamp"])
-        df_det = df_det.set_index("timestamp")
+    with st.form("settings"):
+        # KEY EKLENDİ (Benzersizlik için)
+        nip = st.text_input("IP", value=veritabani.get_ayar("ip"), key="k_ip")
+        npt = st.number_input("Port", value=int(veritabani.get_ayar("port")), key="k_port")
+        nid = st.text_input("ID Listesi", value=veritabani.get_ayar("ids"), key="k_ids")
+        nrf = st.number_input("Hız", value=max(int(veritabani.get_ayar("refresh")), 5), min_value=5, key="k_rf")
         
-        chart_guc.area_chart(df_det["guc"], color="#FFD700")
-        chart_volt.line_chart(df_det["voltaj"], color="#29B6F6")
-        chart_akim.area_chart(df_det["akim"], color="#66BB6A")
-        chart_isi.line_chart(df_det["sicaklik"], color="#EF5350")
+        with st.expander("Kalibrasyon"):
+            c_a, c_b = st.columns(2)
+            ga = c_a.number_input("Güç Adr", value=curr_conf['guc_addr'], key="k_ga")
+            gs = c_b.number_input("Çarpan", value=curr_conf['guc_scale'], key="k_gs")
+            va = c_a.number_input("Volt Adr", value=curr_conf['volt_addr'], key="k_va")
+            vs = c_b.number_input("Çarpan", value=curr_conf['volt_scale'], key="k_vs")
+            aa = c_a.number_input("Akım Adr", value=curr_conf['akim_addr'], key="k_aa")
+            as_ = c_b.number_input("Çarpan", value=curr_conf['akim_scale'], key="k_as")
+            ia = c_a.number_input("Isı Adr", value=curr_conf['isi_addr'], key="k_ia")
+            is_ = c_b.number_input("Çarpan", value=curr_conf['isi_scale'], key="k_is")
 
-# --- ANA DÖNGÜ ---
-if st.session_state.monitoring:
-    client = get_modbus_client(target_ip, target_port)
-    status_bar.success(f"✅ Sistem Aktif - {refresh_rate} saniyede bir güncelleniyor.")
+        if st.form_submit_button("💾 Kaydet"):
+            veritabani.set_ayar("ip", nip); veritabani.set_ayar("port", npt)
+            veritabani.set_ayar("ids", nid); veritabani.set_ayar("refresh", nrf)
+            veritabani.set_ayar("modbus_config", json.dumps({
+                'guc_addr': ga, 'guc_scale': gs, 'volt_addr': va, 'volt_scale': vs,
+                'akim_addr': aa, 'akim_scale': as_, 'isi_addr': ia, 'isi_scale': is_
+            }))
+            st.toast("Ayarlar Kaydedildi!", icon="✅"); time.sleep(1); st.rerun()
+
+# --- 5. ANA İŞLEYİŞ (DÖNGÜ YOK, RERUN VAR) ---
+
+# Veri Çekme
+raw = veritabani.tum_cihazlarin_son_durumu()
+if not raw:
+    st.info("📡 Veri bekleniyor... (Lütfen bekleyin)")
+    time.sleep(3)
+    st.rerun() # Veri yoksa 3sn bekle ve tekrar dene
+
+df = pd.DataFrame(raw, columns=["ID", "Zaman", "Güç", "Voltaj", "Akım", "Isı"])
+
+# KPI Kartları
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Toplam Güç", f"{df['Güç'].sum()/1000:.2f} kW")
+k2.metric("Ort. Voltaj", f"{df['Voltaj'].mean():.1f} V")
+k3.metric("Max Sıcaklık", f"{df['Isı'].max():.1f} °C")
+k4.metric("Aktif Cihaz", len(df))
+st.divider()
+
+# Sekmeler
+tab_list, tab_graph = st.tabs(["📋 Liste", "📈 Grafik Analiz"])
+
+with tab_list:
+    st.dataframe(
+        df.set_index("ID"), use_container_width=True,
+        column_config={
+            "Zaman": st.column_config.DatetimeColumn(format="HH:mm:ss"),
+            "Güç": st.column_config.ProgressColumn("Güç", format="%d W", min_value=0, max_value=max(int(df["Güç"].max()), 100)),
+            "Voltaj": st.column_config.NumberColumn("Voltaj", format="%.1f V"),
+            "Isı": st.column_config.NumberColumn("Sıcaklık", format="%.1f °C")
+        }
+    )
+
+with tab_graph:
+    ids = sorted(df["ID"].unique())
+    # ARTIK HATA VERMEZ, ÇÜNKÜ LOOP YOK
+    selected_id = st.selectbox("🔍 Cihaz Seçin:", ids, key="graph_select_box")
     
-    while True:
-        # 1. TÜM CİHAZLARI TARA
-        for dev_id in target_ids:
-            data, err = read_device(client, dev_id, config)
-            if data:
-                veritabani.veri_ekle(dev_id, data)
-            else:
-                print(f"Hata ID {dev_id}: {err}")
+    if selected_id:
+        row = df[df["ID"] == selected_id].iloc[0]
         
-        # 2. EKRANI GÜNCELLE
-        ui_refresh()
+        # İbreler
+        def gauge(val, title, mx, col):
+            fig = go.Figure(go.Indicator(mode="gauge+number", value=val, title={'text':title},
+                gauge={'axis':{'range':[None, mx]}, 'bar':{'color':col}, 'bgcolor':"#222"}))
+            fig.update_layout(height=180, margin=dict(t=30,b=10,l=20,r=20), paper_bgcolor="rgba(0,0,0,0)", font={'color':"white"})
+            return fig
+
+        g1, g2, g3 = st.columns(3)
+        with g1: st.plotly_chart(gauge(row["Güç"], "Güç (W)", 3000, "#FBBF24"), use_container_width=True)
+        with g2: st.plotly_chart(gauge(row["Voltaj"], "Voltaj (V)", 300, "#60A5FA"), use_container_width=True)
+        with g3: st.plotly_chart(gauge(row["Isı"], "Sıcaklık (°C)", 75, "#F87171"), use_container_width=True)
         
-        # 3. BELİRLENEN SÜRE KADAR BEKLE
-        # Kullanıcı arayüzünde takılma olmasın diye küçük parçalar halinde bekle
-        for i in range(refresh_rate):
-            # Eğer bekleme sırasında kullanıcı "Durdur"a basarsa anında çık
-            if not st.session_state.monitoring:
-                break
-            time.sleep(1)
+        # Çizgi Grafik (Line Chart)
+        hist = veritabani.son_verileri_getir(selected_id, limit=60)
+        if hist:
+            hdf = pd.DataFrame(hist, columns=["zaman", "guc", "voltaj", "akim", "sicaklik"])
+            hdf["zaman"] = pd.to_datetime(hdf["zaman"])
             
-        # Eğer döngüden çıkıldıysa ana while'ı da kır
-        if not st.session_state.monitoring:
-            break
+            # Area değil Line (Çizgi) Grafik
+            fig = px.line(hdf, x="zaman", y="guc", title="Güç Trendi", markers=True)
+            fig.update_traces(line_color="#FBBF24", line_width=3)
+            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="white", height=300)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            c_v, c_t = st.columns(2)
+            with c_v:
+                fig_v = px.line(hdf, x="zaman", y="voltaj", title="Voltaj", markers=False)
+                fig_v.update_traces(line_color="#60A5FA")
+                fig_v.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="white", height=250)
+                st.plotly_chart(fig_v, use_container_width=True)
+            with c_t:
+                fig_t = px.line(hdf, x="zaman", y="sicaklik", title="Sıcaklık", markers=False)
+                fig_t.update_traces(line_color="#F87171")
+                fig_t.add_hline(y=60, line_dash="dot", line_color="red")
+                fig_t.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="white", height=250)
+                st.plotly_chart(fig_t, use_container_width=True)
 
-else:
-    ui_refresh()
-    status_bar.info("Sistem Beklemede. Ayarları yapıp başlatın.")
+# --- 6. OTOMATİK YENİLEME ---
+time.sleep(2)  # 2 saniye bekle
+st.rerun()     # Sayfayı baştan yükle (Bu komut döngüyü sağlar)
