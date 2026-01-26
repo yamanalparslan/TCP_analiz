@@ -1,132 +1,77 @@
 import time
-import json
-import sys
+import logging
+from datetime import datetime
 from pymodbus.client import ModbusTcpClient
 import veritabani
 
-# Veritabanı bağlantı kontrolü
-try:
+# Yapılandırma (Arayüzden bağımsız çalıştığı için buraya sabitliyoruz veya bir config dosyasından çekebilirsin)
+TARGET_IP = "10.35.14.10"
+TARGET_PORT = 502
+REFRESH_RATE = 10  # Kaç saniyede bir veri çekilsin?
+SLAVE_IDS = [1, 2 ,3] # İzlenecek cihazlar
+
+# Modbus Adres Haritası (panel.py ile aynı)
+CONFIG = {
+    'guc_addr': 70, 'guc_scale': 1.0,
+    'volt_addr': 71, 'volt_scale': 0.1,
+    'akim_addr': 72, 'akim_scale': 0.1,
+    'isi_addr': 73, 'isi_scale': 1.0
+}
+
+def read_device(client, slave_id):
+    try:
+        if not client.connected: 
+            client.connect()
+        
+        # GÜNCEL PYMODBUS v3.x Yazımı:
+        # İlk argüman adres, ikinci argüman adet (count), slave ise keyword olarak verilmelidir.
+        r_guc = client.read_holding_registers(CONFIG['guc_addr'], count=1, slave=slave_id)
+        r_volt = client.read_holding_registers(CONFIG['volt_addr'], count=1, slave=slave_id)
+        r_akim = client.read_holding_registers(CONFIG['akim_addr'], count=1, slave=slave_id)
+        r_isi = client.read_holding_registers(CONFIG['isi_addr'], count=1, slave=slave_id)
+
+        # Hata kontrolü (Pymodbus hata nesnesi dönerse)
+        if r_guc.isError(): 
+            return None
+
+        return {
+            "guc": r_guc.registers[0] * CONFIG['guc_scale'],
+            "voltaj": r_volt.registers[0] * CONFIG['volt_scale'],
+            "akim": r_akim.registers[0] * CONFIG['akim_scale'],
+            "sicaklik": r_isi.registers[0] * CONFIG['isi_scale']
+        }
+    except Exception as e:
+        logging.error(f"ID {slave_id} okuma hatası: {e}")
+        return None
+
+        return {
+            "guc": r_guc.registers[0] * CONFIG['guc_scale'],
+            "voltaj": r_volt.registers[0] * CONFIG['volt_scale'],
+            "akim": r_akim.registers[0] * CONFIG['akim_scale'],
+            "sicaklik": r_isi.registers[0] * CONFIG['isi_scale']
+        }
+    except Exception as e:
+        logging.error(f"ID {slave_id} okuma hatası: {e}")
+        return None
+
+def start_collector():
     veritabani.init_db()
-    print("✅ Collector: Veritabanı Hazır.")
-except Exception as e:
-    print(f"🔥 Collector Başlatılamadı: {e}")
-    sys.exit(1)
+    client = ModbusTcpClient(TARGET_IP, port=TARGET_PORT)
+    logging.info(f"Collector başlatıldı: {TARGET_IP}:{TARGET_PORT}")
 
-def run_daemon():
-    print("🚀 Solar Collector: Hassas Zamanlayıcı Modu Devrede...", flush=True)
-    
     while True:
-        # ⏱️ DÖNGÜ BAŞLANGIÇ ZAMANI (Kronometreye Bas)
-        loop_start_time = time.time()
+        start_time = time.time()
+        for dev_id in SLAVE_IDS:
+            data = read_device(client, dev_id)
+            if data:
+                veritabani.veri_ekle(dev_id, data)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ID {dev_id} verisi kaydedildi.")
         
-        try:
-            # 1. AYARLARI VERİTABANINDAN AL (Her turda güncel ayarı okur)
-            target_ip = veritabani.get_ayar("ip")
-            target_port = int(veritabani.get_ayar("port"))
-            
-            # Panelden girilen saniyeyi al (En az 2 sn güvenlik limiti)
-            raw_refresh = int(veritabani.get_ayar("refresh"))
-            target_interval = max(raw_refresh, 2) 
-
-            # ID Listesini Çöz
-            id_str = veritabani.get_ayar("ids")
-            ids = set()
-            try:
-                for part in str(id_str).split(','):
-                    part = part.strip()
-                    if '-' in part:
-                        try:
-                            s, e = map(int, part.split('-'))
-                            ids.update(range(s, e + 1))
-                        except: pass
-                    elif part:
-                        try:
-                            ids.add(int(part))
-                        except: pass
-            except: pass # ID parsing hatası olursa boş set ile devam et
-            
-            target_ids = sorted(list(ids))
-            
-            # Modbus Ayarları
-            try:
-                conf = json.loads(veritabani.get_ayar("modbus_config"))
-            except:
-                print("⚠️ Modbus ayarları okunamadı, varsayılanlar kullanılacak.")
-                conf = {'guc_addr': 16, 'guc_scale': 1.0, 'volt_addr': 0, 'volt_scale': 0.1, 
-                        'akim_addr': 1, 'akim_scale': 0.1, 'isi_addr': 4, 'isi_scale': 1.0}
-
-            print(f"📡 Bağlanıyor: {target_ip}:{target_port} | Hedef Süre: {target_interval}sn", flush=True)
-
-            # 2. CİHAZLARA BAĞLAN
-            # Timeout süresini kısa tutuyoruz ki bir cihaz bozuksa diğerlerini bekletmesin
-            client = ModbusTcpClient(target_ip, port=target_port, timeout=2)
-            
-            if client.connect():
-                for slave_id in target_ids:
-                    try:
-                        # Önce Holding Register dene (Standart)
-                        # Varsayılan olarak Holding Register okuma fonksiyonunu seç
-                        read_func = client.read_holding_registers
-                        
-                        # Güç verisini okumayı dene
-                        r_guc = read_func(address=conf['guc_addr'], count=1, slave=slave_id)
-                        
-                        # Eğer Holding Register okuma hata verdiyse, Input Register dene
-                        if r_guc.isError():
-                            # Fonksiyonu Input Register olarak değiştir
-                            read_func = client.read_input_registers
-                            # Tekrar dene
-                            r_guc = read_func(address=conf['guc_addr'], count=1, slave=slave_id)
-
-                        # Hata yoksa diğerlerini de aynı register tipinden oku
-                        if not r_guc.isError():
-                            # Değerleri Al ve Çarp
-                            val_guc = r_guc.registers[0] * conf['guc_scale']
-                            
-                            # Voltaj
-                            r_volt = read_func(address=conf['volt_addr'], count=1, slave=slave_id)
-                            val_volt = r_volt.registers[0] * conf['volt_scale'] if not r_volt.isError() else 0
-                            
-                            # Akım
-                            r_akim = read_func(address=conf['akim_addr'], count=1, slave=slave_id)
-                            val_akim = r_akim.registers[0] * conf['akim_scale'] if not r_akim.isError() else 0
-                            
-                            # Sıcaklık
-                            r_isi = read_func(address=conf['isi_addr'], count=1, slave=slave_id)
-                            val_isi = r_isi.registers[0] * conf['isi_scale'] if not r_isi.isError() else 0
-
-                            # DB'ye Yaz
-                            veritabani.veri_ekle(slave_id, {
-                                "guc": val_guc, "voltaj": val_volt, "akim": val_akim, "sicaklik": val_isi
-                            })
-                            print(f"   ✅ ID {slave_id} OKUNDU -> Güç: {val_guc} W", flush=True)
-                        else:
-                            print(f"   ⚠️ ID {slave_id} Cevap Vermiyor (Holding ve Input denendi).", flush=True)
-
-                    except Exception as e:
-                        print(f"   🔥 ID {slave_id} Okuma Hatası: {e}", flush=True)
-                
-                client.close()
-            else:
-                print(f"❌ Bağlantı Hatası: {target_ip} adresine ulaşılamıyor.", flush=True)
-
-        except Exception as main_e:
-            print(f"🔥 Genel Döngü Hatası: {main_e}", flush=True)
-
-        # 3. HASSAS ZAMANLAMA (MATEMATİK)
-        # İşlemlerin ne kadar sürdüğünü hesapla
-        elapsed_time = time.time() - loop_start_time
-        
-        # Hedef süreden geçen süreyi çıkar
-        sleep_time = target_interval - elapsed_time
-        
-        if sleep_time > 0:
-            print(f"💤 İşlem {elapsed_time:.2f}sn sürdü. Tam zamanında olması için {sleep_time:.2f}sn uyunuyor...", flush=True)
-            time.sleep(sleep_time)
-        else:
-            # Eğer işlem, hedef süreden daha uzun sürdüyse (örn: 5sn istedin ama okuma 7sn sürdü)
-            print(f"⚠️ DİKKAT: Okuma işlemi ({elapsed_time:.2f}sn), hedef süreden ({target_interval}sn) uzun sürdü! Hiç beklemeden devam ediliyor.", flush=True)
+        # Refresh rate'den geçen süreyi çıkararak hassas bekleme yap
+        elapsed = time.time() - start_time
+        wait = max(0, REFRESH_RATE - elapsed)
+        time.sleep(wait)
 
 if __name__ == "__main__":
-    sys.stdout.reconfigure(encoding='utf-8')
-    run_daemon()
+    logging.basicConfig(level=logging.INFO)
+    start_collector()

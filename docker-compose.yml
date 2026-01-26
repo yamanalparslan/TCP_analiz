@@ -1,26 +1,29 @@
 version: '3.8'
 
 services:
-  # 1. ARKA PLAN SERVİSİ (Veri Toplar)
-  collector:
-    build: .
+  # VERİ TOPLAYICI (Arka Planda Sürekli Çalışır)
+  solar-collector:
     container_name: solar_collector
-    restart: always
+    build: .
+    entrypoint: ["python", "collector.py"]
     volumes:
       - ./solar_log.db:/app/solar_log.db
       - /etc/localtime:/etc/localtime:ro
-    entrypoint: ["python", "collector.py"] # Bu servis collector.py'yi çalıştırır
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
 
-  # 2. ÖN YÜZ (Arayüz Gösterir)
-  frontend:
+  # ARAYÜZ (Sadece İzleme Yapar)
+  solar-monitor:
+    container_name: solar_monitor_pro
     build: .
-    container_name: solar_frontend
-    restart: always
     ports:
       - "8501:8501"
     volumes:
-      - ./solar_log.db:/app/solar_log.db # AYNI veritabanına bakar
+      - ./solar_log.db:/app/solar_log.db
       - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
     depends_on:
-      - collector
-    entrypoint: ["streamlit", "run", "panel.py", "--server.port=8501", "--server.address=0.0.0.0"]
+      - solar-collector
+    environment:
+      - PYTHONUNBUFFERED=1
