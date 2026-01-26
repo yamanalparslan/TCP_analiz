@@ -31,21 +31,29 @@ def run_daemon():
             # ID Listesini Çöz
             id_str = veritabani.get_ayar("ids")
             ids = set()
-            for part in str(id_str).split(','):
-                part = part.strip()
-                if '-' in part:
-                    try:
-                        s, e = map(int, part.split('-'))
-                        ids.update(range(s, e + 1))
-                    except: pass
-                elif part:
-                    try:
-                        ids.add(int(part))
-                    except: pass
+            try:
+                for part in str(id_str).split(','):
+                    part = part.strip()
+                    if '-' in part:
+                        try:
+                            s, e = map(int, part.split('-'))
+                            ids.update(range(s, e + 1))
+                        except: pass
+                    elif part:
+                        try:
+                            ids.add(int(part))
+                        except: pass
+            except: pass # ID parsing hatası olursa boş set ile devam et
+            
             target_ids = sorted(list(ids))
             
             # Modbus Ayarları
-            conf = json.loads(veritabani.get_ayar("modbus_config"))
+            try:
+                conf = json.loads(veritabani.get_ayar("modbus_config"))
+            except:
+                print("⚠️ Modbus ayarları okunamadı, varsayılanlar kullanılacak.")
+                conf = {'guc_addr': 16, 'guc_scale': 1.0, 'volt_addr': 0, 'volt_scale': 0.1, 
+                        'akim_addr': 1, 'akim_scale': 0.1, 'isi_addr': 4, 'isi_scale': 1.0}
 
             print(f"📡 Bağlanıyor: {target_ip}:{target_port} | Hedef Süre: {target_interval}sn", flush=True)
 
@@ -57,24 +65,33 @@ def run_daemon():
                 for slave_id in target_ids:
                     try:
                         # Önce Holding Register dene (Standart)
-                        r_guc = client.read_holding_registers(address=conf['guc_addr'], count=1, slave=slave_id)
-                        
-                        # Holding hata verirse Input Register dene
+                        # Varsayılan olarak Holding Register okuma fonksiyonunu seç
                         read_func = client.read_holding_registers
+                        
+                        # Güç verisini okumayı dene
+                        r_guc = read_func(address=conf['guc_addr'], count=1, slave=slave_id)
+                        
+                        # Eğer Holding Register okuma hata verdiyse, Input Register dene
                         if r_guc.isError():
+                            # Fonksiyonu Input Register olarak değiştir
                             read_func = client.read_input_registers
+                            # Tekrar dene
                             r_guc = read_func(address=conf['guc_addr'], count=1, slave=slave_id)
 
+                        # Hata yoksa diğerlerini de aynı register tipinden oku
                         if not r_guc.isError():
                             # Değerleri Al ve Çarp
                             val_guc = r_guc.registers[0] * conf['guc_scale']
                             
+                            # Voltaj
                             r_volt = read_func(address=conf['volt_addr'], count=1, slave=slave_id)
                             val_volt = r_volt.registers[0] * conf['volt_scale'] if not r_volt.isError() else 0
                             
+                            # Akım
                             r_akim = read_func(address=conf['akim_addr'], count=1, slave=slave_id)
                             val_akim = r_akim.registers[0] * conf['akim_scale'] if not r_akim.isError() else 0
                             
+                            # Sıcaklık
                             r_isi = read_func(address=conf['isi_addr'], count=1, slave=slave_id)
                             val_isi = r_isi.registers[0] * conf['isi_scale'] if not r_isi.isError() else 0
 
@@ -84,7 +101,7 @@ def run_daemon():
                             })
                             print(f"   ✅ ID {slave_id} OKUNDU -> Güç: {val_guc} W", flush=True)
                         else:
-                            print(f"   ⚠️ ID {slave_id} Cevap Vermiyor.", flush=True)
+                            print(f"   ⚠️ ID {slave_id} Cevap Vermiyor (Holding ve Input denendi).", flush=True)
 
                     except Exception as e:
                         print(f"   🔥 ID {slave_id} Okuma Hatası: {e}", flush=True)
