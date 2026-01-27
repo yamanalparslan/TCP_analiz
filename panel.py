@@ -7,9 +7,9 @@ import veritabani
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(
-    page_title="Solar Multi-Monitor",
+    page_title="Solar Monitor",
     layout="wide",
-    page_icon="🏭",
+    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -31,34 +31,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- YENİ ALARM HARİTASI (BIT-MAP) ---
-FAULT_MAP = {
-    0:  "DC Overcurrent Fault [1-1]",
-    1:  "DC Overcurrent Fault [1-2]",
-    2:  "DC Overcurrent Fault [2-1]",
-    3:  "DC Overcurrent Fault [2-2]",
-    4:  "DC Overcurrent Fault [3-1]",
-    5:  "DC Overcurrent Fault [3-2]",
-    6:  "DC Overcurrent Fault [4-1]",
-    7:  "DC Overcurrent Fault [4-2]",
-    8:  "DC Overcurrent Fault [5-1]",
-    9:  "DC Overcurrent Fault [5-2]",
-    10: "DC Overcurrent Fault [6-1]",
-    11: "DC Overcurrent Fault [6-2]",
-    12: "DC Overcurrent Fault [7-1]",
-    13: "DC Overcurrent Fault [7-2]",
-    14: "DC Overcurrent Fault [8-1]",
-    15: "DC Overcurrent Fault [8-2]",
-    16: "DC Overcurrent Fault [9-1]",
-    17: "DC Overcurrent Fault [9-2]",
-    18: "DC Overcurrent Fault [10-1]",
-    19: "DC Overcurrent Fault [10-2]",
-    20: "DC Overcurrent Fault [11-1]",
-    21: "DC Overcurrent Fault [11-2]",
-    22: "DC Overcurrent Fault [12-1]",
-    23: "DC Overcurrent Fault [12-2]"
-}
-
 # --- YARDIMCI FONKSİYONLAR ---
 def parse_id_list(id_string):
     ids = set()
@@ -77,14 +49,6 @@ def parse_id_list(id_string):
             except: pass
     return sorted(list(ids))
 
-def active_fault_checker(hata_kodu):
-    active_faults = []
-    for bit_index in range(24):
-        if (hata_kodu >> bit_index) & 1:
-            mesaj = FAULT_MAP.get(bit_index, f"Bilinmeyen Hata (Bit {bit_index})")
-            active_faults.append(mesaj)
-    return active_faults
-
 @st.cache_resource
 def get_modbus_client(ip, port):
     return ModbusTcpClient(ip, port=port, timeout=1) 
@@ -93,6 +57,7 @@ def read_device(client, slave_id, config):
     try:
         if not client.connected: client.connect()
         
+        # 1. Standart Veriler
         r_guc = client.read_holding_registers(config['guc_addr'], 1, slave=slave_id)
         if r_guc.isError(): return None, "No Response"
         val_guc = r_guc.registers[0] * config['guc_scale']
@@ -106,12 +71,23 @@ def read_device(client, slave_id, config):
         r_isi = client.read_holding_registers(config['isi_addr'], 1, slave=slave_id)
         val_isi = 0 if r_isi.isError() else r_isi.registers[0] * config['isi_scale']
 
-        hata_addr = config.get('hata_addr', 189)
-        r_hata = client.read_holding_registers(hata_addr, 2, slave=slave_id)
-        
-        hata_kodu = 0
-        if not r_hata.isError():
-            hata_kodu = (r_hata.registers[0] << 16) | r_hata.registers[1]
+        # 2. Hata Kodu 1 (Register 189)
+        hata_addr_1 = config.get('hata_addr', 189)
+        hata_kodu_189 = 0
+        try:
+            r_hata = client.read_holding_registers(hata_addr_1, 2, slave=slave_id)
+            if not r_hata.isError():
+                hata_kodu_189 = (r_hata.registers[0] << 16) | r_hata.registers[1]
+        except: pass
+
+        # 3. Hata Kodu 2 (Register 193)
+        hata_kodu_193 = 0
+        try:
+            time.sleep(0.02) 
+            r_hata2 = client.read_holding_registers(193, 2, slave=slave_id)
+            if not r_hata2.isError():
+                hata_kodu_193 = (r_hata2.registers[0] << 16) | r_hata2.registers[1]
+        except: pass
 
         return {
             "slave_id": slave_id,
@@ -119,7 +95,8 @@ def read_device(client, slave_id, config):
             "voltaj": val_volt,
             "akim": val_akim,
             "sicaklik": val_isi,
-            "hata_kodu": hata_kodu,
+            "hata_kodu": hata_kodu_189,    
+            "hata_kodu_193": hata_kodu_193, 
             "timestamp": datetime.now()
         }, None
 
@@ -151,12 +128,12 @@ with st.sidebar:
         c_guc_adr = st.number_input("Güç Adresi", value=70)
         c_guc_sc = st.number_input("Güç Çarpan", value=1.0)
         c_volt_adr = st.number_input("Voltaj Adresi", value=71)
-        c_volt_sc = st.number_input("Voltaj Çarpan", value=0.1)
+        c_volt_sc = st.number_input("Voltaj Çarpan", value=1.0)
         c_akim_adr = st.number_input("Akım Adresi", value=72)
         c_akim_sc = st.number_input("Akım Çarpan", value=0.1)
         c_isi_adr = st.number_input("Isı Adresi", value=73)
         c_isi_sc = st.number_input("Isı Çarpan", value=1.0)
-        c_hata_adr = st.number_input("Hata Adresi (DC Faults)", value=189, help="Dokümanda 40190 ise buraya 189 yazın.")
+        c_hata_adr = st.number_input("Hata Adresi (DC Faults)", value=189)
     
     config = {
         'guc_addr': c_guc_adr, 'guc_scale': c_guc_sc,
@@ -175,28 +152,27 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🗑️ Veri Yönetimi")
-    if st.button("Tüm Verileri Sil", help="Veritabanındaki tüm ölçüm geçmişini temizler."):
+    if st.button("Tüm Verileri Sil"):
         if veritabani.db_temizle():
-            st.success("Veritabanı başarıyla temizlendi!")
+            st.success("Temizlendi!")
             time.sleep(1)
             st.rerun()
-        else:
-            st.error("Silme işlemi başarısız oldu.")
 
 # --- ANA EKRAN ---
 st.title("⚡ Güneş Enerjisi Santrali İzleme")
 
+# Hızlı Özet
 st.subheader("📋 Canlı Filo Durumu")
 table_spot = st.empty()
 
-st.markdown("---")
-st.markdown("### 🚨 Aktif Donanım Arızaları")
-alarm_spot = st.container()
-
+# Grafik Seçimi
 st.markdown("---")
 col_sel, col_info = st.columns([1, 3])
 with col_sel:
     selected_id = st.selectbox("📊 Detaylı Grafik İçin Cihaz Seç:", target_ids)
+with col_info:
+    # Kullanıcıyı diğer sayfaya yönlendiren küçük bir bilgi notu
+    st.info("⚠️ Detaylı arıza kodlarını görmek için sol menüden **alarmlar** sayfasına gidin.")
 
 # Grafik Yer Tutucuları
 row1_c1, row1_c2 = st.columns(2)
@@ -222,33 +198,18 @@ def ui_refresh():
     # 1. TABLO GÜNCELLEME
     summary_data = veritabani.tum_cihazlarin_son_durumu()
     if summary_data:
-        # Tabloyu oluştururken Hata Kodu (index 6) hariç ilk 6 sütunu alıyoruz
-        # summary_data satır yapısı: [slave_id, zaman, guc, voltaj, akim, sicaklik, hata_kodu]
         df_sum = pd.DataFrame([row[:6] for row in summary_data], columns=["ID", "Son Zaman", "Güç (W)", "Voltaj (V)", "Akım (A)", "Isı (C)"])
         df_sum["Son Zaman"] = pd.to_datetime(df_sum["Son Zaman"]).dt.strftime('%H:%M:%S')
         table_spot.dataframe(df_sum.set_index("ID"), use_container_width=True)
 
-        # 2. HATA KODU ANALİZİ (YENİ SİSTEM)
-        with alarm_spot:
-            active_alarms = 0
-            for row in summary_data:
-                # row yapısı: (0:id, 1:zaman, 2:guc, 3:voltaj, 4:akim, 5:isi, 6:hata_kodu)
-                if len(row) > 6:
-                    hata_kodu = row[6]
-                    if hata_kodu > 0: 
-                        hatalar = active_fault_checker(hata_kodu)
-                        for hata_mesaji in hatalar:
-                            st.error(f"🛑 KRİTİK ARIZA [ID: {row[0]}]: {hata_mesaji}")
-                            active_alarms += 1
-                
-            if active_alarms == 0:
-                st.success("✅ Sistem Stabil - Aktif Donanım Arızası Yok")
-
-    # 3. GRAFİK GÜNCELLEME
+    # 2. GRAFİK GÜNCELLEME
     detail_data = veritabani.son_verileri_getir(selected_id, limit=100)
     if detail_data:
-        # DÜZELTME BURADA YAPILDI: "hata_kodu" sütunu listeye eklendi
-        df_det = pd.DataFrame(detail_data, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik", "hata_kodu"])
+        try:
+            df_det = pd.DataFrame(detail_data, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik", "hata_kodu", "hata_kodu_193"])
+        except:
+            df_det = pd.DataFrame(detail_data, columns=["timestamp", "guc", "voltaj", "akim", "sicaklik", "hata_kodu"])
+            
         df_det["timestamp"] = pd.to_datetime(df_det["timestamp"])
         df_det = df_det.set_index("timestamp")
         
@@ -260,7 +221,7 @@ def ui_refresh():
 # --- ANA DÖNGÜ ---
 if st.session_state.monitoring:
     client = get_modbus_client(target_ip, target_port)
-    status_bar.success(f"✅ Sistem Aktif - Hata Registerları İzleniyor.")
+    status_bar.success(f"✅ Sistem Aktif")
     
     while st.session_state.monitoring:
         for dev_id in target_ids:
